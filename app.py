@@ -157,44 +157,70 @@ def processar_dados_diarios(df, data_referencia):
 
 def processar_dados_periodo(df, data_ini, data_fim):
     """
-    Processa a planilha para um PERÍODO (data_ini até data_fim, inclusive).
-    Gera dados consolidados e uma tabela de entregas por dia/janela.
+    Processa a planilha para um PERÍODO (data_ini até data_fim, inclusive)
+    SOMANDO os mesmos indicadores do relatório DIÁRIO.
+
+    Ou seja:
+    - Para cada dia do período, chama processar_dados_diarios(...)
+    - Soma TOTAL, ENTREGUE, DEVOLVIDO, EM_ENTREGA, janelas J1..J5
+    - Monta uma tabela dia a dia com TD% de cada dia
     """
+
     di = pd.to_datetime(data_ini).date()
     dfim = pd.to_datetime(data_fim).date()
 
-    base = df[(df['DTHRSAIDA'].dt.date >= di) & (df['DTHRSAIDA'].dt.date <= dfim)].copy()
+    # Pega todos os dias que têm DTHRSAIDA na planilha
+    datas_candidatas = sorted(df['DTHRSAIDA'].dropna().dt.date.unique())
 
-    if base.empty:
+    # Filtra pelos dias dentro do intervalo escolhido
+    datas_periodo = [d for d in datas_candidatas if di <= d <= dfim]
+
+    if not datas_periodo:
         raise ValueError("Não há registros no período informado.")
 
-    # Totais gerais
-    TOTAL = len(base)
-    if 'SITUACAO' in base.columns:
-        entregue = (base['SITUACAO'].str.contains('Entregue', case=False, na=False)).sum()
-        devolvido = (base['SITUACAO'].str.contains('Devolvido', case=False, na=False)).sum()
-        em_entrega = (base['SITUACAO'].str.contains('Em Entrega', case=False, na=False)).sum()
-    else:
-        entregue = devolvido = em_entrega = 0
+    linhas = []
+    TOTAL = ENTREGUE = DEVOLVIDO = EM_ENTREGA = 0
+    J1 = J2 = J3 = J4 = J5 = 0
 
-    TD_pct = round(100 * devolvido / (entregue + devolvido), 2) if (entregue + devolvido) > 0 else 0.0
+    for dia in datas_periodo:
+        # Usa a MESMA lógica do relatório diário
+        dados_dia = processar_dados_diarios(df, dia.strftime('%Y-%m-%d'))
 
-    # Classificar janelas
-    base['JANELA'] = base['DTHRSAIDA'].apply(classificar_janela)
-    base['DATA'] = base['DTHRSAIDA'].dt.date
-    janela_counts = base['JANELA'].value_counts().to_dict()
+        # Se nesse dia não teve saída, pula
+        if dados_dia['TOTAL'] == 0:
+            continue
 
-    J1 = janela_counts.get('J1', 0)
-    J2 = janela_counts.get('J2', 0)
-    J3 = janela_counts.get('J3', 0)
-    J4 = janela_counts.get('J4', 0)
-    J5 = janela_counts.get('J5', 0)
+        TOTAL += dados_dia['TOTAL']
+        ENTREGUE += dados_dia['ENTREGUE']
+        DEVOLVIDO += dados_dia['DEVOLVIDO']
+        EM_ENTREGA += dados_dia['EM_ENTREGA']
 
-    # Número de dias com movimento no período
-    dias_com_mov = sorted(base['DATA'].unique())
-    n_dias = len(dias_com_mov)
+        J1 += dados_dia['J1']
+        J2 += dados_dia['J2']
+        J3 += dados_dia['J3']
+        J4 += dados_dia['J4']
+        J5 += dados_dia['J5']
 
-    # Metas proporcionais ao número de dias (considera só dias com movimento)
+        linhas.append({
+            'DATA': dia.strftime('%d/%m/%Y'),
+            'TOTAL': dados_dia['TOTAL'],
+            'J1': dados_dia['J1'],
+            'J2': dados_dia['J2'],
+            'J3': dados_dia['J3'],
+            'J4': dados_dia['J4'],
+            'J5': dados_dia['J5'],
+            'TD_PCT_DIA': dados_dia['TD_PCT']
+        })
+
+    if not linhas:
+        raise ValueError("Não há registros válidos no período (após consolidar por dia).")
+
+    janela_dia = pd.DataFrame(linhas)
+    n_dias = len(janela_dia)
+
+    TD_PCT = round(100 * DEVOLVIDO / (ENTREGUE + DEVOLVIDO), 2) if (ENTREGUE + DEVOLVIDO) > 0 else 0.0
+
+    # Metas proporcionais ao número de dias (mesma lógica do diário, mas multiplicando pelos dias)
     meta_base = {'J1': 30, 'J2': 20, 'J3': 10, 'J4': 30, 'J5': 10, 'TOTAL': 100}
     META_J1 = meta_base['J1'] * n_dias
     META_J2 = meta_base['J2'] * n_dias
@@ -210,26 +236,15 @@ def processar_dados_periodo(df, data_ini, data_fim):
     J5_PCT_META = round(100 * J5 / META_J5, 1) if META_J5 else 0
     TOTAL_PCT_META = round(100 * TOTAL / META_TOTAL, 1) if META_TOTAL else 0
 
-    # Tabela de entregas por dia/janela
-    janela_dia = base.groupby(['DATA', 'JANELA']).size().unstack(fill_value=0)
-    # Garante colunas das janelas
-    for j in ['J1', 'J2', 'J3', 'J4', 'J5']:
-        if j not in janela_dia.columns:
-            janela_dia[j] = 0
-    janela_dia['TOTAL'] = janela_dia[['J1', 'J2', 'J3', 'J4', 'J5']].sum(axis=1)
-    janela_dia = janela_dia[['J1', 'J2', 'J3', 'J4', 'J5', 'TOTAL']].reset_index()
-    janela_dia['DATA'] = janela_dia['DATA'].apply(lambda d: d.strftime('%d/%m/%Y'))
-    janela_dia = janela_dia[['DATA', 'TOTAL', 'J1', 'J2', 'J3', 'J4', 'J5']]
-
     return {
         'data_ini': di.strftime('%d/%m/%Y'),
         'data_fim': dfim.strftime('%d/%m/%Y'),
         'N_DIAS': n_dias,
         'TOTAL': int(TOTAL),
-        'ENTREGUE': int(entregue),
-        'DEVOLVIDO': int(devolvido),
-        'EM_ENTREGA': int(em_entrega),
-        'TD_PCT': TD_pct,
+        'ENTREGUE': int(ENTREGUE),
+        'DEVOLVIDO': int(DEVOLVIDO),
+        'EM_ENTREGA': int(EM_ENTREGA),
+        'TD_PCT': TD_PCT,
         'J1': int(J1), 'J2': int(J2), 'J3': int(J3), 'J4': int(J4), 'J5': int(J5),
         'META_J1': META_J1, 'META_J2': META_J2, 'META_J3': META_J3, 'META_J4': META_J4, 'META_J5': META_J5,
         'META_TOTAL': META_TOTAL,
@@ -910,3 +925,4 @@ def gerar_periodo():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+

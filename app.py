@@ -49,7 +49,7 @@ def gerar_html_tabela(df, colunas):
     # Linhas
     for _, row in df.iterrows():
         html += '<tr>'
-        for col in df.columns:
+        for col in colunas:
             html += f'<td>{row[col]}</td>'
         html += '</tr>\n'
 
@@ -191,6 +191,96 @@ def processar_dados_diarios(df, data_referencia):
         'J1_dist': J1_dist,
         'J4_dist': J4_dist,
         'rank': rank_top20,
+    }
+
+
+
+def processar_dados_diarios_v2(df, data_referencia):
+    """Processa a planilha (df) e retorna os dados do NOVO relatório diário (2 páginas)."""
+    data_ref = pd.to_datetime(data_referencia).date()
+
+    if 'DTHRSAIDA' not in df.columns:
+        raise ValueError("A planilha não possui a coluna 'DTHRSAIDA'.")
+
+    base = df[df['DTHRSAIDA'].dt.date == data_ref].copy()
+    if base.empty:
+        raise ValueError("Não há entregas para a data selecionada.")
+
+    total = len(base)
+
+    # Status
+    if 'SITUACAO' in base.columns:
+        entregue = (base['SITUACAO'].astype(str).str.contains('Entregue', case=False, na=False)).sum()
+        devolvido = (base['SITUACAO'].astype(str).str.contains('Devolvido', case=False, na=False)).sum()
+        em_entrega = (base['SITUACAO'].astype(str).str.contains('Em Entrega', case=False, na=False)).sum()
+    else:
+        entregue = devolvido = em_entrega = 0
+
+    td_pct = round((devolvido / total) * 100, 2) if total else 0.0
+
+    # Janelas (J1..J5)
+    base['JANELA'] = base['DTHRSAIDA'].apply(classificar_janela)
+    janela_counts = base['JANELA'].value_counts().to_dict()
+
+    J1 = int(janela_counts.get('J1', 0))
+    J2 = int(janela_counts.get('J2', 0))
+    J3 = int(janela_counts.get('J3', 0))
+    J4 = int(janela_counts.get('J4', 0))
+    J5 = int(janela_counts.get('J5', 0))
+
+    # Top 10 Motoristas
+    if 'MOTORISTA' in base.columns:
+        top_motor = base['MOTORISTA'].value_counts().head(10).reset_index()
+        top_motor.columns = ['Motorista', 'Entregas']
+        top_motor['%'] = (top_motor['Entregas'] / total * 100).round(1)
+    else:
+        top_motor = pd.DataFrame(columns=['Motorista', 'Entregas', '%'])
+
+    # Top 10 Bairros
+    if 'BAIRRO' in base.columns:
+        top_bairro = base['BAIRRO'].value_counts().head(10).reset_index()
+        top_bairro.columns = ['Bairro', 'Entregas']
+        top_bairro['%'] = (top_bairro['Entregas'] / total * 100).round(1)
+    else:
+        top_bairro = pd.DataFrame(columns=['Bairro', 'Entregas', '%'])
+
+    # Tipo de veículo (TPRODADO) – mapeamento Oliveira
+    if 'TPRODADO' in base.columns:
+        mapa_tp = {
+            '02-Toco': 'Caçamba 5m³',
+            '05-Utilitário': 'HR basculante',
+            '06-Outros': 'Caçamba / Carroceria 3m³',
+            '07-VUC': 'Carroceria 6m (VUC)',
+            '00-Não Aplicável': 'Munck'
+        }
+        veic = base['TPRODADO'].value_counts().reset_index()
+        veic.columns = ['TPRODADO', 'Entregas']
+        veic['Tipo de Veículo'] = veic['TPRODADO'].map(mapa_tp).fillna(veic['TPRODADO'].astype(str))
+        veic['%'] = (veic['Entregas'] / total * 100).round(1)
+        veic = veic[['Tipo de Veículo', 'Entregas', '%']]
+    else:
+        veic = pd.DataFrame(columns=['Tipo de Veículo', 'Entregas', '%'])
+
+    # Expedição (ESTABEX)
+    if 'ESTABEX' in base.columns:
+        exp = base['ESTABEX'].value_counts().reset_index()
+        exp.columns = ['Expedição', 'Entregas']
+        exp['%'] = (exp['Entregas'] / total * 100).round(1)
+    else:
+        exp = pd.DataFrame(columns=['Expedição', 'Entregas', '%'])
+
+    return {
+        'data_ref': data_ref.strftime('%d/%m/%Y'),
+        'TOTAL': int(total),
+        'ENTREGUE': int(entregue),
+        'DEVOLVIDO': int(devolvido),
+        'EM_ENTREGA': int(em_entrega),
+        'TD_PCT': float(td_pct),
+        'J1': J1, 'J2': J2, 'J3': J3, 'J4': J4, 'J5': J5,
+        'TOP_MOTOR': top_motor,
+        'TOP_BAIRRO': top_bairro,
+        'VEIC': veic,
+        'EXP': exp,
     }
 
 
@@ -762,6 +852,113 @@ def montar_html_relatorio_diario(dados):
 # -------------------------------------------------------------------
 # Montagem do HTML – RELATÓRIO DE PERÍODO
 # -------------------------------------------------------------------
+
+def montar_html_relatorio_diario_v2(dados):
+    """Monta o HTML do NOVO relatório diário (2 páginas) para PDF."""
+    logo_src = img_to_data_uri("Logo Oliveira Sem Fundo.png")
+    oliver_src = img_to_data_uri("Oliver_RomaneioSF.png")
+
+    def pct(x):
+        return round((x / dados['TOTAL']) * 100, 1) if dados['TOTAL'] else 0.0
+
+    tabela_janelas = f"""
+    <table>
+      <thead><tr><th>Janela</th><th>Entregas</th><th>%</th></tr></thead>
+      <tbody>
+        <tr><td>1ª Janela</td><td>{dados['J1']}</td><td>{pct(dados['J1'])}%</td></tr>
+        <tr><td>2ª Janela</td><td>{dados['J2']}</td><td>{pct(dados['J2'])}%</td></tr>
+        <tr><td>3ª Janela</td><td>{dados['J3']}</td><td>{pct(dados['J3'])}%</td></tr>
+        <tr><td>4ª Janela</td><td>{dados['J4']}</td><td>{pct(dados['J4'])}%</td></tr>
+        <tr><td>5ª Janela</td><td>{dados['J5']}</td><td>{pct(dados['J5'])}%</td></tr>
+      </tbody>
+    </table>
+    """
+
+    veic_tbl = gerar_html_tabela(dados['VEIC'], ['Tipo de Veículo', 'Entregas', '%'])
+    exp_tbl  = gerar_html_tabela(dados['EXP'],  ['Expedição', 'Entregas', '%'])
+    mot_tbl  = gerar_html_tabela(dados['TOP_MOTOR'], ['Motorista', 'Entregas', '%'])
+    bai_tbl  = gerar_html_tabela(dados['TOP_BAIRRO'], ['Bairro', 'Entregas', '%'])
+
+    html = f"""
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page {{ size: A4; margin: 18mm; }}
+    body {{ font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #111; }}
+    .header {{
+      display:flex; justify-content:space-between; align-items:center;
+      border-bottom: 3px solid #008000; padding-bottom: 10px; min-height: 80px;
+    }}
+    .logo-container img {{ max-height: 55px; }}
+    .mascote-container img {{ max-height: 95px; }}
+    .title {{ text-align:center; font-weight:700; font-size: 16pt; color:#008000; margin: 14px 0 6px; }}
+    .subtitle {{ text-align:center; font-size: 12pt; color:#333; margin-bottom: 14px; }}
+    .section-title {{
+      font-size: 13pt; font-weight: 700; color:#008000;
+      margin-top: 16px; border-bottom: 2px solid #008000; padding-bottom: 4px;
+    }}
+    table {{ width:100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 14px; font-size: 10pt; }}
+    th {{ background:#008000; color:#fff; padding: 8px; text-align:left; }}
+    td {{ padding: 6px; border-bottom: 1px solid #ddd; }}
+    tr:nth-child(even) {{ background: #f7f7f7; }}
+    .kpis {{ margin-top: 10px; margin-bottom: 14px; }}
+    .kpis strong {{ color: #008000; }}
+    .page-break {{ page-break-after: always; }}
+  </style>
+</head>
+<body>
+
+  <!-- PÁGINA 1 -->
+  <div class="header">
+    <div class="logo-container">{f'<img src="{logo_src}">' if logo_src else ''}</div>
+    <div class="mascote-container">{f'<img src="{oliver_src}">' if oliver_src else ''}</div>
+  </div>
+
+  <div class="title">RELATÓRIO DIÁRIO DE ENTREGAS</div>
+  <div class="subtitle">Data de referência: {dados['data_ref']}</div>
+
+  <div class="section-title">1. RESUMO EXECUTIVO</div>
+  <div class="kpis">
+    <p>
+      <strong>Total:</strong> {dados['TOTAL']} &nbsp;|&nbsp;
+      <strong>Entregue:</strong> {dados['ENTREGUE']} &nbsp;|&nbsp;
+      <strong>Devolvido:</strong> {dados['DEVOLVIDO']} &nbsp;|&nbsp;
+      <strong>Em Entrega:</strong> {dados['EM_ENTREGA']} &nbsp;|&nbsp;
+      <strong>TD%:</strong> {dados['TD_PCT']}%
+    </p>
+  </div>
+
+  <div class="section-title">2. DISTRIBUIÇÃO POR JANELA</div>
+  {tabela_janelas}
+
+  <div class="section-title">3. ANÁLISE POR TIPO DE VEÍCULO (TPRODADO)</div>
+  {veic_tbl}
+
+  <div class="section-title">4. ANÁLISE POR EXPEDIÇÃO (ESTABEX)</div>
+  {exp_tbl}
+
+  <div class="page-break"></div>
+
+  <!-- PÁGINA 2 -->
+  <div class="header">
+    <div class="logo-container">{f'<img src="{logo_src}">' if logo_src else ''}</div>
+    <div class="mascote-container">{f'<img src="{oliver_src}">' if oliver_src else ''}</div>
+  </div>
+
+  <div class="title">DESEMPENHO POR MOTORISTA – TOP 10</div>
+  {mot_tbl}
+
+  <div class="title" style="margin-top:8px;">DISTRIBUIÇÃO GEOGRÁFICA – TOP 10</div>
+  {bai_tbl}
+
+</body>
+</html>
+"""
+    return html
+
+
 def montar_html_relatorio_periodo(dados):
     """Monta o HTML do relatório de acompanhamento de PERÍODO."""
 
@@ -1079,6 +1276,10 @@ INDEX_HTML = """
           Relatório Diário (1 dia)
         </label>
         <label>
+          <input type="radio" name="tipo_relatorio" value="novo">
+          Relatório Diário (NOVO – 2 páginas, Top10 + Veículo + Expedição)
+        </label>
+        <label>
           <input type="radio" name="tipo_relatorio" value="periodo">
           Relatório de Período (início e fim)
         </label>
@@ -1104,13 +1305,14 @@ INDEX_HTML = """
   </form>
 
   <script>
-    const radioDiario = document.querySelector('input[value="diario"]');
-    const radioPeriodo = document.querySelector('input[value="periodo"]');
     const divDiario = document.getElementById('div_diario');
     const divPeriodo = document.getElementById('div_periodo');
 
     function atualizarVisibilidade() {
-      if (radioDiario.checked) {
+      const tipo = document.querySelector('input[name="tipo_relatorio"]:checked').value;
+      const isDiario = (tipo === "diario" || tipo === "novo");
+
+      if (isDiario) {
         divDiario.style.opacity = 1;
         divDiario.style.pointerEvents = 'auto';
         divPeriodo.style.opacity = 0.4;
@@ -1123,8 +1325,10 @@ INDEX_HTML = """
       }
     }
 
-    radioDiario.addEventListener('change', atualizarVisibilidade);
-    radioPeriodo.addEventListener('change', atualizarVisibilidade);
+    document.querySelectorAll('input[name="tipo_relatorio"]').forEach(r => {
+      r.addEventListener('change', atualizarVisibilidade);
+    });
+
     atualizarVisibilidade();
   </script>
 </body>
@@ -1153,13 +1357,19 @@ def gerar():
 
         tipo = request.form.get("tipo_relatorio", "diario")
 
-        if tipo == "diario":
+        if tipo in ("diario", "novo"):
             data_ref = request.form.get("data_referencia")
             if not data_ref:
                 return render_template_string(INDEX_HTML, error="Informe a data de referência para o relatório diário.")
-            dados = processar_dados_diarios(df, data_ref)
-            html = montar_html_relatorio_diario(dados)
-            nome_pdf = f"relatorio_diario_{data_ref}.pdf"
+
+            if tipo == "diario":
+                dados = processar_dados_diarios(df, data_ref)
+                html = montar_html_relatorio_diario(dados)
+                nome_pdf = f"relatorio_diario_{data_ref}.pdf"
+            else:
+                dados = processar_dados_diarios_v2(df, data_ref)
+                html = montar_html_relatorio_diario_v2(dados)
+                nome_pdf = f"relatorio_diario_v2_{data_ref}.pdf"
         else:
             data_ini = request.form.get("data_ini")
             data_fim = request.form.get("data_fim")
